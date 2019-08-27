@@ -24,6 +24,8 @@ module EltArray = struct
   let get t i = t.(Int64.to_int i)
 
   let length t = Array.length t |> Int64.of_int
+
+  let pre_fetch _ ~low:_ ~high:_ = ()
 end
 
 module Metric = struct
@@ -85,8 +87,10 @@ let interpolation_duplicates () =
 
 let () =
   Alcotest.run "search"
-    [ ( "interpolation",
-        [ Alcotest.test_case "unique" `Quick interpolation_unique;
-          Alcotest.test_case "duplicates" `Quick interpolation_duplicates
-        ] )
+    [
+      ( "interpolation",
+        [
+          Alcotest.test_case "unique" `Quick interpolation_unique;
+          Alcotest.test_case "duplicates" `Quick interpolation_duplicates;
+        ] );
     ]

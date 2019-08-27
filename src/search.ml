@@ -6,6 +6,8 @@ module type ARRAY = sig
   val get : t -> int64 -> elt
 
   val length : t -> int64
+
+  val pre_fetch : t -> low:int64 -> high:int64 -> unit
 end
 
 module type ENTRY = sig
@@ -87,6 +89,7 @@ module Make
     let key_metric = Metric.of_key key in
     (* The core of the search *)
     let rec search low high lowest_entry highest_entry =
+      Array.pre_fetch array ~low ~high;
       if high < low then []
       else
         let lowest_entry = Lazy.force lowest_entry in
