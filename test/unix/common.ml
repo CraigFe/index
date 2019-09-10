@@ -23,7 +23,7 @@ let report () =
 
 let string_size = 20
 
-let index_size = 103
+let index_size = 11_001
 
 let () = Random.self_init ()
 
