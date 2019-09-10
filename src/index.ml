@@ -64,6 +64,8 @@ module type S = sig
   val close : t -> unit
 
   val force_merge : t -> key -> value -> unit
+
+  val fan_out : t -> Fan.t
 end
 
 let may f = function None -> () | Some bf -> f bf
@@ -292,6 +294,7 @@ module Make (K : Key) (V : Value) (IO : IO) = struct
         let fan_out =
           Fan.import ~hash_size:K.encoded_size (IO.get_fanout io)
         in
+        Log.err (fun m -> m "sync_log updated the index");
         t.index <- Some { fan_out; io };
         t.generation <- generation )
     else if log_offset < new_log_offset then
@@ -454,4 +457,7 @@ module Make (K : Key) (V : Value) (IO : IO) = struct
       t.index <- None;
       Tbl.reset t.log_mem;
       may (fun lock -> IO.unlock lock) t.lock )
+
+  let fan_out t =
+    match t.index with Some i -> i.fan_out | None -> invalid_arg "boom"
 end

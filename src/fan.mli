@@ -3,6 +3,9 @@ type t
 val equal : t -> t -> bool
 (** The equality function for fan-out. *)
 
+val pp : t Fmt.t
+(** The pretty-printer for fan-outs. *)
+
 val v : hash_size:int -> entry_size:int -> int -> t
 (** [v ~hash_size ~entry_size n] creates a fan_out for an index with [hash_size]
     and [entry_size], containing [n] elements. *)

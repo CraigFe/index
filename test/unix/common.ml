@@ -18,14 +18,14 @@ let reporter ?(prefix = "") () =
   { Logs.report }
 
 let report () =
-  Logs.set_level (Some Logs.Debug);
+  Logs.set_level (Some Logs.Error);
   Logs.set_reporter (reporter ())
 
 let string_size = 20
 
-let index_size = 11_001
+let index_size = 10_480
 
-let () = Random.self_init ()
+let () = Random.init 1
 
 let random_char () = char_of_int (33 + Random.int 94)
 

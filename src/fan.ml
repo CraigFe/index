@@ -1,4 +1,4 @@
-type t = { fans : int64 array; mask : int; shift : int }
+type t = { fans : int64 array; mask : int; shift : int } [@@deriving show]
 
 let equal t t' =
   let rec loop i =

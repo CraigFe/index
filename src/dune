@@ -2,4 +2,5 @@
  (public_name index)
  (name index)
  (modules_without_implementation io)
- (libraries logs fmt))
+ (libraries logs fmt ppx_deriving.runtime)
+ (preprocess (pps ppx_deriving.show)))
