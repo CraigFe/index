@@ -24,6 +24,8 @@ let decode_int64 buf =
 
 type t = { fd : Unix.file_descr } [@@unboxed]
 
+type raw = t
+
 let v fd = { fd }
 
 let really_write fd fd_offset buffer =
@@ -63,60 +65,98 @@ let unsafe_read t ~off ~len buf =
   Stats.add_read n;
   n
 
-module Offset = struct
-  let set t n =
-    let buf = encode_int64 n in
-    unsafe_write t ~off:0L buf
+module Headers = struct
+  module Offset = struct
+    let set t n =
+      let buf = encode_int64 n in
+      unsafe_write t ~off:0L buf
+
+    let get t =
+      let buf = Bytes.create 8 in
+      let n = unsafe_read t ~off:0L ~len:8 buf in
+      assert (n = 8);
+      decode_int64 (Bytes.unsafe_to_string buf)
+  end
+
+  module Version = struct
+    let get t =
+      let buf = Bytes.create 8 in
+      let n = unsafe_read t ~off:8L ~len:8 buf in
+      assert (n = 8);
+      Bytes.unsafe_to_string buf
+
+    let set t v = unsafe_write t ~off:8L v
+  end
+
+  module Generation = struct
+    let get t =
+      let buf = Bytes.create 8 in
+      let n = unsafe_read t ~off:16L ~len:8 buf in
+      assert (n = 8);
+      decode_int64 (Bytes.unsafe_to_string buf)
+
+    let set t gen =
+      let buf = encode_int64 gen in
+      unsafe_write t ~off:16L buf
+  end
+
+  module Fan = struct
+    let set t buf =
+      let size = encode_int64 (Int64.of_int (String.length buf)) in
+      unsafe_write t ~off:24L size;
+      if buf <> "" then unsafe_write t ~off:(24L ++ 8L) buf
+
+    let get_size t =
+      let size_buf = Bytes.create 8 in
+      let n = unsafe_read t ~off:24L ~len:8 size_buf in
+      assert (n = 8);
+      decode_int64 (Bytes.unsafe_to_string size_buf)
+
+    let set_size t size =
+      let buf = encode_int64 size in
+      unsafe_write t ~off:24L buf
+
+    let get t =
+      let size = Int64.to_int (get_size t) in
+      let buf = Bytes.create size in
+      let n = unsafe_read t ~off:(24L ++ 8L) ~len:size buf in
+      assert (n = size);
+      Bytes.unsafe_to_string buf
+  end
+
+  type t = {
+    offset : int64;
+    version : string;
+    generation : int64;
+    fan_size : int64;
+  }
+
+  (** NOTE: These functions must be equivalent to calling the above [set] /
+      [get] functions individually. *)
+
+  let total_header_length = 8 + 8 + 8 + 8
+
+  let read_word buf off =
+    let result = Bytes.create 8 in
+    Bytes.blit buf off result 0 8;
+    Bytes.unsafe_to_string result
 
   let get t =
-    let buf = Bytes.create 8 in
-    let n = unsafe_read t ~off:0L ~len:8 buf in
-    assert (n = 8);
-    decode_int64 (Bytes.unsafe_to_string buf)
-end
+    let header = Bytes.create total_header_length in
+    let n = unsafe_read t ~off:0L ~len:total_header_length header in
+    assert (n = total_header_length);
+    let offset = read_word header 0 |> decode_int64 in
+    let version = read_word header 8 in
+    let generation = read_word header 16 |> decode_int64 in
+    let fan_size = read_word header 24 |> decode_int64 in
+    { offset; version; generation; fan_size }
 
-module Version = struct
-  let get t =
-    let buf = Bytes.create 8 in
-    let n = unsafe_read t ~off:8L ~len:8 buf in
-    assert (n = 8);
-    Bytes.unsafe_to_string buf
-
-  let set t v = unsafe_write t ~off:8L v
-end
-
-module Generation = struct
-  let get t =
-    let buf = Bytes.create 8 in
-    let n = unsafe_read t ~off:16L ~len:8 buf in
-    assert (n = 8);
-    decode_int64 (Bytes.unsafe_to_string buf)
-
-  let set t gen =
-    let buf = encode_int64 gen in
-    unsafe_write t ~off:16L buf
-end
-
-module Fan = struct
-  let set t buf =
-    let size = encode_int64 (Int64.of_int (String.length buf)) in
-    unsafe_write t ~off:24L size;
-    if buf <> "" then unsafe_write t ~off:(24L ++ 8L) buf
-
-  let get_size t =
-    let size_buf = Bytes.create 8 in
-    let n = unsafe_read t ~off:24L ~len:8 size_buf in
-    assert (n = 8);
-    decode_int64 (Bytes.unsafe_to_string size_buf)
-
-  let set_size t size =
-    let buf = encode_int64 size in
-    unsafe_write t ~off:24L buf
-
-  let get t =
-    let size = Int64.to_int (get_size t) in
-    let buf = Bytes.create size in
-    let n = unsafe_read t ~off:(24L ++ 8L) ~len:size buf in
-    assert (n = size);
-    Bytes.unsafe_to_string buf
+  let set t { offset; version; generation; fan_size } =
+    assert (String.length version = 8);
+    let b = Bytes.create total_header_length in
+    Bytes.blit_string (encode_int64 offset) 0 b 0 8;
+    Bytes.blit_string version 0 b 8 8;
+    Bytes.blit_string (encode_int64 generation) 0 b 16 8;
+    Bytes.blit_string (encode_int64 fan_size) 0 b 24 8;
+    unsafe_write t ~off:0L (Bytes.unsafe_to_string b)
 end

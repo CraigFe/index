@@ -16,6 +16,7 @@ The above copyright notice and this permission notice shall be included in
 all copies or substantial portions of the Software. *)
 
 module Stats = Stats
+module Io = Io
 
 module type Key = sig
   type t
@@ -374,7 +375,9 @@ struct
           log;
       IO.close io );
     let generation =
-      match log with None -> 0L | Some log -> IO.get_generation log.io
+      match log with
+      | None -> 0L
+      | Some log -> (IO.read_headers log.io).generation
     in
     let index =
       let index_path = index_path root in
@@ -440,7 +443,7 @@ struct
       | None -> t.log_async <- try_load_log t (log_async_path t.root)
       | Some log ->
           let offset = IO.offset log.io in
-          let new_offset = IO.force_offset log.io in
+          let new_offset = (IO.read_headers log.io).offset in
           if generation_change || offset <> new_offset then (
             Tbl.clear log.mem;
             iter_io (add_log_entry log) log.io )
@@ -452,9 +455,10 @@ struct
     match t.log with
     | None -> sync_log_async ()
     | Some log ->
-        let generation = IO.get_generation log.io in
         let log_offset = IO.offset log.io in
-        let new_log_offset = IO.force_offset log.io in
+        let Io.Headers.{ generation; offset = new_log_offset; _ } =
+          IO.read_headers log.io
+        in
         let add_log_entry e = add_log_entry log e in
         sync_log_async ~generation_change:(t.generation <> generation) ();
         if t.generation <> generation then (

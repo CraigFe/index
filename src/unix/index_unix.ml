@@ -24,8 +24,9 @@ exception RO_not_allowed
 let current_version = "00000001"
 
 module Stats = Index.Stats
+module Headers = Index.Io.Headers
 
-module IO : Index.IO = struct
+module IO : Index.Io.S = struct
   let ( ++ ) = Int64.add
 
   let ( -- ) = Int64.sub
@@ -49,7 +50,7 @@ module IO : Index.IO = struct
     if buf = "" then ()
     else (
       Raw.unsafe_write t.raw ~off:t.flushed buf;
-      Raw.Offset.set t.raw offset;
+      Raw.Headers.Offset.set t.raw offset;
       assert (t.flushed ++ Int64.of_int (String.length buf) = t.header ++ offset);
       t.flushed <- offset ++ t.header );
     if with_fsync then Raw.fsync t.raw
@@ -86,26 +87,17 @@ module IO : Index.IO = struct
 
   let offset t = t.offset
 
-  let force_offset t =
-    t.offset <- Raw.Offset.get t.raw;
-    t.offset
-
   let version _ = current_version
-
-  let get_generation t =
-    let i = Raw.Generation.get t.raw in
-    Log.debug (fun m -> m "get_generation: %Ld" i);
-    i
 
   let set_generation t i =
     Log.debug (fun m -> m "set_generation: %Ld" i);
-    Raw.Generation.set t.raw i
+    Raw.Headers.Generation.set t.raw i
 
-  let get_fanout t = Raw.Fan.get t.raw
+  let get_fanout t = Raw.Headers.Fan.get t.raw
 
   let set_fanout t buf =
     assert (Int64.equal (Int64.of_int (String.length buf)) t.fan_size);
-    Raw.Fan.set t.raw buf
+    Raw.Headers.Fan.set t.raw buf
 
   let readonly t = t.readonly
 
@@ -135,9 +127,9 @@ module IO : Index.IO = struct
   let clear ?(keep_generation = false) t =
     t.offset <- 0L;
     t.flushed <- t.header;
-    if not keep_generation then Raw.Generation.set t.raw 0L;
-    Raw.Offset.set t.raw t.offset;
-    Raw.Fan.set t.raw "";
+    if not keep_generation then Raw.Headers.Generation.set t.raw 0L;
+    Raw.Headers.Offset.set t.raw t.offset;
+    Raw.Headers.Fan.set t.raw "";
     Buffer.clear t.buf
 
   let buffers = Hashtbl.create 256
@@ -171,10 +163,9 @@ module IO : Index.IO = struct
     | false ->
         let x = Unix.openfile file Unix.[ O_CREAT; O_CLOEXEC; mode ] 0o644 in
         let raw = Raw.v x in
-        Raw.Offset.set raw 0L;
-        Raw.Fan.set_size raw fan_size;
-        Raw.Version.set raw current_version;
-        Raw.Generation.set raw generation;
+        Raw.Headers.(
+          set raw
+            { offset = 0L; version = current_version; generation; fan_size });
         v ~fan_size ~offset:0L raw
     | true ->
         let x = Unix.openfile file Unix.[ O_EXCL; O_CLOEXEC; mode ] 0o644 in
@@ -182,19 +173,17 @@ module IO : Index.IO = struct
         if readonly && fresh then
           Fmt.failwith "IO.v: cannot reset a readonly file"
         else if fresh then (
-          Raw.Offset.set raw 0L;
-          Raw.Fan.set_size raw fan_size;
-          Raw.Version.set raw current_version;
-          Raw.Generation.set raw generation;
+          Raw.Headers.(
+            set raw
+              { offset = 0L; version = current_version; generation; fan_size });
           v ~fan_size ~offset:0L raw )
         else
-          let version = Raw.Version.get raw in
+          let Raw.Headers.{ offset; version; fan_size; _ } =
+            Raw.Headers.get raw
+          in
           if version <> current_version then
             Fmt.failwith "Io.v: unsupported version %s (current version is %s)"
               version current_version;
-
-          let offset = Raw.Offset.get raw in
-          let fan_size = Raw.Fan.get_size raw in
           v ~fan_size ~offset raw
 
   type lock = { path : string; fd : Unix.file_descr }
@@ -241,6 +230,13 @@ module IO : Index.IO = struct
   let unlock { path; fd } =
     Log.debug (fun l -> l "Unlocking %s" path);
     Unix.close fd
+
+  let read_headers t =
+    let Raw.Headers.{ offset; generation; _ } = Raw.Headers.get t.raw in
+    t.offset <- Raw.Headers.Offset.get t.raw;
+    let headers = Headers.{ offset; generation } in
+    Log.debug (fun m -> m "read_headers: %a" Headers.pp headers);
+    headers
 end
 
 module Mutex = struct

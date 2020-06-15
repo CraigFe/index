@@ -15,6 +15,13 @@ furnished to do so, subject to the following conditions:
 The above copyright notice and this permission notice shall be included in
 all copies or substantial portions of the Software. *)
 
+module Headers = struct
+  type t = { offset : int64; generation : int64 }
+
+  let pp ppf { offset; generation } =
+    Format.fprintf ppf "{ offset = %Ld; generation = %Ld }" offset generation
+end
+
 module type S = sig
   type t
 
@@ -28,9 +35,12 @@ module type S = sig
 
   val name : t -> string
 
-  val offset : t -> int64
+  val version : t -> string
 
-  val force_offset : t -> int64
+  val offset : t -> int64
+  (** [offset t] is the total size of valid data stored by [t] in bytes. {b
+      NOTE:} this does not observe any entries added concurrently via other
+      instances (this is achieved by {!read_headers}). *)
 
   val readonly : t -> bool
 
@@ -40,11 +50,9 @@ module type S = sig
 
   val sync : ?with_fsync:bool -> t -> unit
 
-  val version : t -> string
+  val read_headers : t -> Headers.t
 
   val set_generation : t -> int64 -> unit
-
-  val get_generation : t -> int64
 
   val set_fanout : t -> string -> unit
 

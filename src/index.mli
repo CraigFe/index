@@ -66,6 +66,7 @@ module type Key = sig
 end
 
 module Stats = Stats
+module Io = Io
 
 (** The input of [Make] for values. The same requirements as for [Key] apply. *)
 module type Value = sig

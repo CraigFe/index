@@ -1,12 +1,4 @@
-(** [Raw] wraps a file-descriptor with an file-format used internally by Index.
-    The format contains the following header fields:
-
-    - {b offset}: a 64-bit integer, denoting the length of the file containing
-      valid data;
-    - {b version}: an 8-byte version string;
-    - {b generation}: a 64-bit integer denoting the generation number;
-    - {b fan}: a 64-bit length field, followed by a string containing that many
-      bytes. *)
+(** [Raw] wraps a file-descriptor with an file-format used internally by Index. *)
 
 type t
 (** The type of [raw] file handles. *)
@@ -22,30 +14,45 @@ val fsync : t -> unit
 
 val close : t -> unit
 
-module Version : sig
-  val get : t -> string
+type raw = t
 
-  val set : t -> string -> unit
-end
+module Headers : sig
+  type t = {
+    offset : int64;  (** The length of the file containing valid data *)
+    version : string;  (** Format version *)
+    generation : int64;  (** Generation number *)
+    fan_size : int64;  (** Length of the subsequent [fan] field *)
+  }
 
-module Offset : sig
-  val get : t -> int64
+  val get : raw -> t
 
-  val set : t -> int64 -> unit
-end
+  val set : raw -> t -> unit
 
-module Generation : sig
-  val get : t -> int64
+  module Version : sig
+    val get : raw -> string
 
-  val set : t -> int64 -> unit
-end
+    val set : raw -> string -> unit
+  end
 
-module Fan : sig
-  val get : t -> string
+  module Offset : sig
+    val get : raw -> int64
 
-  val set : t -> string -> unit
+    val set : raw -> int64 -> unit
+  end
 
-  val get_size : t -> int64
+  module Generation : sig
+    val get : raw -> int64
 
-  val set_size : t -> int64 -> unit
+    val set : raw -> int64 -> unit
+  end
+
+  module Fan : sig
+    val get : raw -> string
+
+    val set : raw -> string -> unit
+
+    val get_size : raw -> int64
+
+    val set_size : raw -> int64 -> unit
+  end
 end
