@@ -1,10 +1,19 @@
 (executable
+ (modules bench)
  (public_name bench)
  (package index-bench)
  (preprocess
   (pps ppx_repr ppx_deriving_yojson))
  (libraries index index.unix cmdliner metrics metrics-unix yojson fmt re
    stdlib-shims))
+
+(executable
+ (name memory_usage)
+ (modules memory_usage)
+ (libraries index index.unix tezos-crypto data-encoding memtrace progress
+   progress.unix rusage mtime mtime.clock mtime.clock.os)
+ (preprocess
+  (pps ppx_repr ppx_deriving_yojson)))
 
 (alias
  (name bench)

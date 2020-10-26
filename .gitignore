@@ -6,3 +6,4 @@ _tests/
 *.install
 *.merlin
 **/.DS_Store
+**/.ipynb_checkpoints

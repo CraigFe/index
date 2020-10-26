@@ -10,6 +10,7 @@ type t = {
   mutable nb_sync : int;
   mutable time_sync : float;
 }
+[@@deriving repr]
 
 let fresh_stats () =
   {

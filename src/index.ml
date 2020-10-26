@@ -218,12 +218,12 @@ struct
         IO.v ~fresh:false ~readonly:true ~generation:0L ~fan_size:0L path
       in
       let mem = Tbl.create 0 in
-      iter_io (fun e -> Tbl.replace mem e.key e.value) io;
+      iter_io (fun e -> Tbl.add mem e.key e.value) io;
       Some { io; mem })
     else None
 
   let sync_log_entries ?min log =
-    let add_log_entry (e : Entry.t) = Tbl.replace log.mem e.key e.value in
+    let add_log_entry (e : Entry.t) = Tbl.add log.mem e.key e.value in
     if min = None then Tbl.clear log.mem;
     iter_io ?min add_log_entry log.io
 
@@ -634,7 +634,7 @@ struct
               let append_io = IO.append log.io in
               Tbl.iter
                 (fun key value ->
-                  Tbl.replace log.mem key value;
+                  Tbl.add log.mem key value;
                   Entry.encode' key value append_io)
                 log_async.mem;
               (* NOTE: It {i may} not be necessary to trigger the
@@ -718,7 +718,7 @@ struct
             | None -> assert_and_get t.log
           in
           Entry.encode' key value (IO.append log.io);
-          Tbl.replace log.mem key value;
+          Tbl.add log.mem key value;
           Int64.compare (IO.offset log.io) (Int64.of_int t.config.log_size) > 0)
     in
     if log_limit_reached then

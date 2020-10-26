@@ -25,6 +25,8 @@ type t = {
       [sampling_interval] specified when calling [end_replace].
     - [time_sync] is the duration of the latest call to sync. *)
 
+val t : t Repr.t
+
 val reset_stats : unit -> unit
 
 val get : unit -> t
