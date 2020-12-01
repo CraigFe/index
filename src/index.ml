@@ -63,9 +63,21 @@ struct
   let pp_value = Repr.pp V.t
 
   module Entry = struct
-    include Data.Entry.Make (K) (V)
     module Key = K
-    module Value = V
+
+    module Value = struct
+      type t = V.t Lazy.t
+
+      let t = Repr.map V.t Lazy.from_val Lazy.force
+
+      let encode (lazy t) = V.encode t
+
+      let encoded_size = V.encoded_size
+
+      let decode buf off = lazy (V.decode buf off)
+    end
+
+    include Data.Entry.Make (Key) (Value)
 
     let to_key { key; _ } = key
 
@@ -218,12 +230,14 @@ struct
         IO.v ~fresh:false ~readonly:true ~generation:0L ~fan_size:0L path
       in
       let mem = Tbl.create 0 in
-      iter_io (fun e -> Tbl.replace mem e.key e.value) io;
+      iter_io (fun e -> Tbl.replace mem e.key (Lazy.force e.value)) io;
       Some { io; mem })
     else None
 
   let sync_log_entries ?min log =
-    let add_log_entry (e : Entry.t) = Tbl.replace log.mem e.key e.value in
+    let add_log_entry (e : Entry.t) =
+      Tbl.replace log.mem e.key (Lazy.force e.value)
+    in
     if min = None then Tbl.clear log.mem;
     iter_io ?min add_log_entry log.io
 
@@ -321,7 +335,7 @@ struct
             l "[%s] log file detected. Loading %Ld entries"
               (Filename.basename root) entries);
         let mem = Tbl.create (Int64.to_int entries) in
-        iter_io (fun e -> Tbl.replace mem e.key e.value) io;
+        iter_io (fun e -> Tbl.replace mem e.key (Lazy.force e.value)) io;
         Some { io; mem }
     in
     let generation =
@@ -347,7 +361,7 @@ struct
             let append_io = IO.append log.io in
             iter_io
               (fun e ->
-                Tbl.replace log.mem e.key e.value;
+                Tbl.replace log.mem e.key (Lazy.force e.value);
                 Entry.encode e append_io)
               io;
             IO.flush log.io;
@@ -463,14 +477,16 @@ struct
     in
     Semaphore.with_acquire t.rename_lock @@ fun () ->
     match find_log_async () with
-    | e -> e
+    | e -> lazy e
     | exception Not_found -> (
-        match find_log () with e -> e | exception Not_found -> find_index ())
+        match find_log () with
+        | e -> lazy e
+        | exception Not_found -> find_index ())
 
   let find t key =
     let t = check_open t in
     Log.info (fun l -> l "[%s] find %a" (Filename.basename t.root) pp_key key);
-    find_instance t key
+    Lazy.force (find_instance t key)
 
   let mem t key =
     let t = check_open t in
@@ -525,7 +541,7 @@ struct
              ||
              let key = log.(log_i).key in
              not K.(equal key e.key))
-             && filter (e.key, e.value)
+             && filter (e.key, Lazy.force e.value)
             then
              let buf_str = Bytes.sub buf buf_offset Entry.encoded_size in
              append_buf_fanout fan_out e.key_hash
@@ -580,7 +596,7 @@ struct
         let b = Array.make (Tbl.length log.mem) witness in
         Tbl.fold
           (fun key value i ->
-            b.(i) <- Entry.v key value;
+            b.(i) <- Entry.v key (Lazy.from_val value);
             i + 1)
           log.mem 0
         |> ignore;
@@ -639,7 +655,7 @@ struct
               Tbl.iter
                 (fun key value ->
                   Tbl.replace log.mem key value;
-                  Entry.encode' key value append_io)
+                  Entry.encode' key (Lazy.from_val value) append_io)
                 log_async.mem;
               (* NOTE: It {i may} not be necessary to trigger the
                  [flush_callback] here. If the instance has been recently
@@ -675,7 +691,9 @@ struct
     | Some log -> (
         let exception Found of Entry.t in
         match
-          Tbl.iter (fun key value -> raise (Found (Entry.v key value))) log.mem
+          Tbl.iter
+            (fun key value -> raise (Found (Entry.v key (Lazy.from_val value))))
+            log.mem
         with
         | exception Found e -> Some e
         | () -> (
@@ -723,7 +741,7 @@ struct
             | Some log -> log
             | None -> assert_and_get t.log
           in
-          Entry.encode' key value (IO.append log.io);
+          Entry.encode' key (Lazy.from_val value) (IO.append log.io);
           Tbl.replace log.mem key value;
           Int64.compare (IO.offset log.io) (Int64.of_int t.config.log_size) > 0)
     in
@@ -735,7 +753,7 @@ struct
           None
       | `Overcommit_memory, false | `Block_writes, _ ->
           let hook = hook |> Option.map (fun f stage -> f (`Merge stage)) in
-          Some (merge ?hook ~witness:(Entry.v key value) t)
+          Some (merge ?hook ~witness:(Entry.v key (Lazy.from_val value)) t)
     else None
 
   let replace t key value =
@@ -772,13 +790,17 @@ struct
     | None -> ()
     | Some log ->
         Tbl.iter f log.mem;
-        may (fun (i : index) -> iter_io (fun e -> f e.key e.value) i.io) t.index;
+        may
+          (fun (i : index) ->
+            iter_io (fun e -> f e.key (Lazy.force e.value)) i.io)
+          t.index;
         Semaphore.with_acquire t.rename_lock (fun () ->
             (match t.log_async with
             | None -> ()
             | Some log -> Tbl.iter f log.mem);
             may
-              (fun (i : index) -> iter_io (fun e -> f e.key e.value) i.io)
+              (fun (i : index) ->
+                iter_io (fun e -> f e.key (Lazy.force e.value)) i.io)
               t.index)
 
   let close' ~hook ?immediately it =
