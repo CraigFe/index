@@ -16,7 +16,9 @@ CAMLprim value caml_index_pread
   size_t len = Long_val(v_len);
 
   size_t numbytes = (len > UNIX_BUFFER_SIZE) ? UNIX_BUFFER_SIZE : len;
+  caml_enter_blocking_section();
   ret = pread(fd, &Byte(v_buf, buf_off), numbytes, fd_off);
+  caml_leave_blocking_section();
 
   if (ret == -1) uerror("read", Nothing);
 
