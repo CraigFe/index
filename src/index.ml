@@ -827,10 +827,7 @@ struct
             | None -> None
             | Some index ->
                 let buf = Bytes.create Entry.encoded_size in
-                let n =
-                  IO.read index.io ~off:Int63.zero ~len:Entry.encoded_size buf
-                in
-                assert (n = Entry.encoded_size);
+                IO.read index.io ~off:Int63.zero ~len:Entry.encoded_size buf;
                 Some (Entry.decode (Bytes.unsafe_to_string buf) 0)))
 
   (** This triggers a merge if the [log] exceeds [log_size], or if the [log]

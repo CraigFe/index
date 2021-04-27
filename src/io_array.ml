@@ -53,8 +53,7 @@ module Make (IO : Io.S) (Elt : ELT) :
 
   let get_entry_from_io io off =
     let buf = Bytes.create Elt.encoded_size in
-    let n = IO.read io ~off ~len:Elt.encoded_size buf in
-    assert (n = Elt.encoded_size);
+    IO.read io ~off ~len:Elt.encoded_size buf;
     Elt.decode (Bytes.unsafe_to_string buf) 0
 
   let ( -- ) = Int63.sub
@@ -92,8 +91,7 @@ module Make (IO : Io.S) (Elt : ELT) :
     let range = Elt.encoded_size * (1 + Int63.to_int (high -- low)) in
     let low_off = Int63.mul low Elt.encoded_sizeL in
     let high_off = Int63.mul high Elt.encoded_sizeL in
-    let n = IO.read t.io ~off:low_off ~len:range buf in
-    assert (n = range);
+    IO.read t.io ~off:low_off ~len:range buf;
     t.buffer <- Some { buf; low_off; high_off }
 
   let pre_fetch t ~low ~high =

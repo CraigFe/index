@@ -15,7 +15,7 @@ module type S = sig
 
   val offset : t -> int63
 
-  val read : t -> off:int63 -> len:int -> bytes -> int
+  val read : t -> off:int63 -> len:int -> bytes -> unit
 
   val clear : generation:int63 -> t -> unit
 

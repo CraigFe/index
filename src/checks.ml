@@ -20,7 +20,7 @@ module Make (K : Data.Key) (V : Data.Value) (IO : Io.S) = struct
 
     let read_entry io off =
       let buf = Bytes.create Entry.encoded_size in
-      let (_ : int) = IO.read io ~off ~len:Entry.encoded_size buf in
+      IO.read io ~off ~len:Entry.encoded_size buf;
       Entry.decode (Bytes.unsafe_to_string buf) 0
   end
 

@@ -49,7 +49,7 @@ let populate_random ~size io =
 
 (* Tests *)
 let read_sequential () =
-  let size = 1000 in
+  let size = 5 in
   let io = fresh_io "read_sequential" in
   let mem_arr, io_arr = populate_random ~size io in
   for i = 0 to size - 1 do

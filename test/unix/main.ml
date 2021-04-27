@@ -778,6 +778,7 @@ end
 
 let () =
   Common.report ();
+  Random.self_init ();
   Alcotest.run "index.unix"
     [
       ("io_array", Io_array.tests);

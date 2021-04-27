@@ -56,7 +56,8 @@ module IO : Index.IO = struct
       Raw.unsafe_write t.raw ~off:t.flushed buf;
       Raw.Offset.set t.raw offset;
       assert (t.flushed ++ Int63.of_int (String.length buf) = t.header ++ offset);
-      t.flushed <- offset ++ t.header);
+      t.flushed <- offset ++ t.header;
+      Raw.flush t.raw);
     if with_fsync then Raw.fsync t.raw
 
   let rename ~src ~dst =

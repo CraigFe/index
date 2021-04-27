@@ -32,8 +32,6 @@ module String_size = struct
   let length = 20
 end
 
-let () = Random.self_init ()
-
 let random_char () = char_of_int (33 + Random.int 94)
 
 let random_string () = String.init String_size.length (fun _i -> random_char ())

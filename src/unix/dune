@@ -5,4 +5,5 @@
  (public_name index.unix)
  (name index_unix)
  (libraries fmt index logs logs.threaded threads.posix unix semaphore-compat
-   mtime mtime.clock.os optint))
+            mtime mtime.clock.os optint uring iovec bigstringaf)
+(preprocess (pps ppx_repr)))

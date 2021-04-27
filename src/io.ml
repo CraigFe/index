@@ -29,9 +29,9 @@ module Extend (S : S) = struct
       else
         let len = Int63.to_int (min remaining page_size) in
         let raw = Bytes.create len in
-        let n = read io ~off:offset ~len raw in
+        read io ~off:offset ~len raw;
         let rec read_page page off =
-          if off = n then ()
+          if off = len then ()
           else
             let read =
               f ~off:Int63.(add (of_int off) offset) ~buf:page ~buf_off:off

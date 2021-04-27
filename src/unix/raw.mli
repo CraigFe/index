@@ -18,7 +18,9 @@ val v : Unix.file_descr -> t
 
 val unsafe_write : t -> off:int63 -> string -> unit
 
-val unsafe_read : t -> off:int63 -> len:int -> bytes -> int
+val unsafe_read : t -> off:int63 -> len:int -> bytes -> unit
+
+val flush : t -> unit
 
 val fsync : t -> unit
 
