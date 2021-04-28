@@ -90,13 +90,24 @@ struct
 
   let iter_io ?min ?max f = IO.iter ?min ?max (fun _ -> f)
 
-  type throttle = [ `Overcommit_memory | `Block_writes ]
+  module Throttle = struct
+    type t = [ `Overcommit_memory | `Block_writes ]
+    let pp = Fmt.of_to_string (function
+                 | `Overcommit_memory -> "`Overcommit_memory"
+                 | `Block_writes -> "`Block_writes"
+               )
+
+    let of_string = function
+      | "overcommit_memory" -> Some `Overcommit_memory
+      | "block_writes" -> Some `Block_writes
+      | _ -> None
+  end
 
   type config = {
     log_size : int;
     readonly : bool;
     fresh : bool;
-    throttle : throttle;
+    throttle : Throttle.t;
     flush_callback : unit -> unit;
   }
 
@@ -299,6 +310,19 @@ struct
     let writer_lock =
       if not readonly then Some (IO.Lock.lock (Layout.lock ~root)) else None
     in
+    let throttle, reason =
+      match Sys.getenv_opt "INDEX_THROTTLE" with
+      | None -> (
+        match throttle with
+        | Some t -> t, "~throttle argument"
+        | None -> `Block_writes, "default"
+      )
+      | Some x ->
+         match Throttle.of_string x with
+         | Some t -> t, "environment variable"
+         | None -> Fmt.failwith "Couldn't parse INDEX_THROTTLE option: %s" x
+    in
+    Log.info (fun l -> l "Using throttle: %a (%s)" Throttle.pp throttle reason) ;
     let config =
       {
         log_size = log_size * Entry.encoded_size;
@@ -396,7 +420,7 @@ struct
   let empty_cache = Cache.create
 
   let v ?(flush_callback = fun () -> ()) ?(cache = empty_cache ())
-      ?(fresh = false) ?(readonly = false) ?(throttle = `Block_writes) ~log_size
+      ?(fresh = false) ?(readonly = false) ?throttle ~log_size
       root =
     let new_instance () =
       let instance =
@@ -555,6 +579,7 @@ struct
     let counter = Mtime_clock.counter () in
     let merge_id = merge_counter () in
     let msg = Fmt.strf "merge { id=%d }" merge_id in
+    Log.info (fun l -> l "[%s] awaiting the lock for merge { id=%d }" (Filename.basename t.root) merge_id);
     Semaphore.acquire msg t.merge_lock;
     let merge_lock_wait = Mtime_clock.count counter in
     Log.info (fun l ->
@@ -741,12 +766,19 @@ struct
               || Int64.compare (IO.offset log.io)
                    (Int64.of_int t.config.log_size)
                  > 0
-            then merge' ~force ?hook ~witness t
-            else Thread.return `Completed)
+            then (
+              Log.debug (fun f -> f "try_merge_aux about to merge");
+              merge' ~force ?hook ~witness t
+            ) else Thread.return `Completed)
 
-  let merge t = ignore (try_merge_aux ?hook:None ~force:true t : _ async)
+  let merge t =
+    if true then assert false;
+    ignore (try_merge_aux ?hook:None ~force:true t : _ async)
 
-  let try_merge t = ignore (try_merge_aux ?hook:None ~force:false t : _ async)
+  let try_merge t =
+    if true then assert false;
+    ignore (try_merge_aux ?hook:None ~force:false t : _ async)
+
 
   (** [t.merge_lock] is used to detect an ongoing merge. Other operations can
       take this lock, but as they are not async, we consider this to be a good
@@ -778,6 +810,7 @@ struct
     in
     if log_limit_reached && not overcommit then
       let is_merging = instance_is_merging t in
+      Log.info (fun f -> f "instance_is_merging t: %b" is_merging);
       match (t.config.throttle, is_merging) with
       | `Overcommit_memory, true ->
           (* Merging now would block on completion of the ongoing merge *)
@@ -799,7 +832,7 @@ struct
 
   let filter t f =
     let t = check_open t in
-    Log.debug (fun l -> l "[%s] filter" (Filename.basename t.root));
+    Log.info (fun l -> l "[%s] filter" (Filename.basename t.root));
     if t.config.readonly then raise RO_not_allowed;
     let witness =
       Semaphore.with_acquire "witness" t.rename_lock (fun () -> get_witness t)
