@@ -45,6 +45,7 @@ module Make_private
     (Platform : PLATFORM)
     (Cache : Cache.S) =
 struct
+  module Std_thread = Thread
   open Platform
 
   type 'a async = 'a Thread.t
@@ -115,7 +116,7 @@ struct
     mem : value Tbl.t;  (** The in-memory counterpart of [io]. *)
   }
 
-  type instance = {
+  type shared_instance = {
     config : config;
     root : string;  (** The root location of the index *)
     mutable generation : int63;
@@ -146,6 +147,7 @@ struct
             operation. All operations should be guarded by this lock. *)
     mutable pending_cancel : bool;
         (** A signal for the merging thread to terminate prematurely. *)
+    trace : Trace.t;
   }
 
   include Private_types
@@ -154,6 +156,7 @@ struct
     match instance.pending_cancel with true -> `Abort | false -> `Continue
 
   (* [t] is an [option ref] to handle [close] operations. A closed index is None. *)
+  type instance = { state : shared_instance; pid : int; tid : int }
   type t = instance option ref
 
   let check_open t =
@@ -162,7 +165,7 @@ struct
   (** {1 Clear} *)
 
   let clear' ~hook t =
-    let t = check_open t in
+    let t = (check_open t).state in
     Log.debug (fun l -> l "clear %S" t.root);
     if t.config.readonly then raise RO_not_allowed;
     t.pending_cancel <- true;
@@ -207,7 +210,7 @@ struct
         IO.flush ?no_callback ~with_fsync log.io
 
   let flush ?no_callback ?(with_fsync = false) t =
-    let t = check_open t in
+    let t = (check_open t).state in
     Log.debug (fun l -> l "[%s] flush" (Filename.basename t.root));
     Semaphore.with_acquire "flush" t.rename_lock (fun () ->
         flush_instance ?no_callback ~with_fsync t)
@@ -260,6 +263,27 @@ struct
              cleared, and the generation should have changed. *)
         else if offset > h.offset then assert false
 
+  let ( let& ) f k =
+    let timer = Clock.counter () in
+    let r = f () in
+    let span = Clock.count timer in
+    k (r, Mtime.Span.to_s span)
+
+  let emit t ~name ~start_time ~duration =
+    let dur = Chrome_trace.Event.Timestamp.of_float_seconds duration in
+    let event =
+      Chrome_trace.Event.complete ~dur
+        Chrome_trace.Event.(
+          common_fields ~pid:t.pid ~tid:t.tid ~ts:start_time ~name ())
+    in
+    Trace.emit t.state.trace event
+
+  let with_trace t ~name f =
+    let start_time = Chrome_trace.Event.Timestamp.now () in
+    let& r, duration = f in
+    emit t ~name ~start_time ~duration;
+    r
+
   (** Syncs the [index] of the instance by checking on-disk changes. *)
   let sync_index t =
     (* Close the file handler to be able to reload it, as the file may have
@@ -277,6 +301,8 @@ struct
   (** Syncs an instance entirely, by checking on-disk changes for [log], [sync],
       and [log_async]. *)
   let sync_instance ?(hook = fun _ -> ()) t =
+    with_trace t ~name:"sync" @@ fun () ->
+    let t = t.state in
     Semaphore.with_acquire "sync" t.sync_lock @@ fun () ->
     Log.debug (fun l ->
         l "[%s] checking for changes on disk (generation=%a)"
@@ -376,7 +402,8 @@ struct
 
   (** Finds the value associated to [key] in [t]. In order, checks in
       [log_async] (in memory), then [log] (in memory), then [index] (on disk). *)
-  let find_instance t key =
+  let find_instance t_outer key =
+    let t = t_outer.state in
     let find_if_exists ~name ~find db =
       match db with
       | None -> raise Not_found
@@ -397,6 +424,7 @@ struct
     let find_index () =
       find_if_exists ~name:"index" ~find:interpolation_search t.index
     in
+    with_trace t_outer ~name:"find_instance" @@ fun () ->
     Semaphore.with_acquire "find_instance" t.rename_lock @@ fun () ->
     match find_log_async () with
     | e -> e
@@ -405,20 +433,23 @@ struct
 
   let find t key =
     let t = check_open t in
-    Log.debug (fun l -> l "[%s] find %a" (Filename.basename t.root) pp_key key);
+    Log.debug (fun l ->
+        l "[%s] find %a" (Filename.basename t.state.root) pp_key key);
     find_instance t key
 
   let mem t key =
     let t = check_open t in
-    Log.debug (fun l -> l "[%s] mem %a" (Filename.basename t.root) pp_key key);
+    Log.debug (fun l ->
+        l "[%s] mem %a" (Filename.basename t.state.root) pp_key key);
     match find_instance t key with _ -> true | exception Not_found -> false
 
   let sync' ?hook t =
     let f t =
       Stats.incr_nb_sync ();
       let t = check_open t in
-      Log.info (fun l -> l "[%s] sync" (Filename.basename t.root));
-      if t.config.readonly then sync_instance ?hook t else raise RW_not_allowed
+      Log.info (fun l -> l "[%s] sync" (Filename.basename t.state.root));
+      if t.state.config.readonly then sync_instance ?hook t
+      else raise RW_not_allowed
     in
     Stats.sync_with_timer (fun () -> f t)
 
@@ -515,6 +546,11 @@ struct
               l "[%s] no index file detected." (Filename.basename root));
           None)
     in
+    let trace =
+      let tmp_file, oc = Filename.open_temp_file "index-trace" ".ctf" in
+      Fmt.epr "Sending trace to: %s@." tmp_file;
+      Trace.create (Out oc)
+    in
     {
       config;
       generation;
@@ -528,6 +564,7 @@ struct
       sync_lock = Semaphore.make true;
       writer_lock;
       pending_cancel = false;
+      trace;
     }
 
   type cache = (string * bool, instance) Cache.t
@@ -539,7 +576,12 @@ struct
       root =
     let new_instance () =
       let instance =
-        v_no_cache ~flush_callback ~fresh ~readonly ~log_size ~throttle root
+        {
+          state =
+            v_no_cache ~flush_callback ~fresh ~readonly ~log_size ~throttle root;
+          pid = Unix.getpid ();
+          tid = 0;
+        }
       in
       if readonly then sync_instance instance;
       Cache.add cache (root, readonly) instance;
@@ -558,14 +600,14 @@ struct
         Cache.remove cache (root, false);
         new_instance ()
     | Some t, true -> (
-        match t.open_instances with
+        match t.state.open_instances with
         | 0 ->
             Cache.remove cache (root, readonly);
             new_instance ()
         | _ ->
             Log.debug (fun l ->
                 l "[%s] found in cache" (Filename.basename root));
-            t.open_instances <- t.open_instances + 1;
+            t.state.open_instances <- t.state.open_instances + 1;
             if readonly then sync_instance t;
             let t = ref (Some t) in
             if fresh then clear t;
@@ -688,7 +730,9 @@ struct
       - [t.log_async] has been created;
       - [t.merge_lock] is acquired before entry, and released immediately after
         this function returns or raises an exception. *)
-  let unsafe_perform_merge ~witness ~filter ~hook t =
+  let unsafe_perform_merge ~witness ~filter ~hook t_outer =
+    let t_outer = { t_outer with pid = Unix.getpid (); tid = 1 } in
+    let t = t_outer.state in
     hook `Before;
     let log = Option.get t.log in
     let generation = Int63.succ t.generation in
@@ -726,6 +770,7 @@ struct
         merge_path
     in
     let merge_result : [ `Index_io of IO.t | `Aborted ] =
+      with_trace t_outer ~name:"merge-perform" @@ fun () ->
       match t.index with
       | None -> (
           match check_pending_cancel t with
@@ -754,6 +799,7 @@ struct
         IO.set_fanout merge (Fan.export index.fan_out);
         let before_rename_lock = Clock.counter () in
         let rename_lock_duration =
+          with_trace t_outer ~name:"merge-rename" @@ fun () ->
           Semaphore.with_acquire "merge-rename" t.rename_lock (fun () ->
               let rename_lock_duration = Clock.count before_rename_lock in
               IO.rename ~src:merge ~dst:index.io;
@@ -789,7 +835,8 @@ struct
         (`Completed, rename_lock_duration)
 
   let merge' ?(blocking = false) ?filter ?(hook = fun _ -> ()) ~witness
-      ?(force = false) t =
+      ?(force = false) t_outer =
+    let t = t_outer.state in
     let merge_started = Clock.counter () in
     let merge_id = merge_counter () in
     let msg = Fmt.strf "merge { id=%d }" merge_id in
@@ -820,7 +867,7 @@ struct
     let go () =
       let merge_result, rename_lock_wait =
         Fun.protect
-          (fun () -> unsafe_perform_merge ~filter ~hook ~witness t)
+          (fun () -> unsafe_perform_merge ~filter ~hook ~witness t_outer)
           ~finally:(fun () -> Semaphore.release t.merge_lock)
       in
       let total_duration = Clock.count merge_started in
@@ -867,7 +914,8 @@ struct
   (** This triggers a merge if the [log] exceeds [log_size], or if the [log]
       contains entries and [force] is true *)
   let try_merge_aux ?hook ?(force = false) t =
-    let t = check_open t in
+    let t_outer = check_open t in
+    let t = t_outer.state in
     let witness =
       Semaphore.with_acquire "witness" t.rename_lock (fun () -> get_witness t)
     in
@@ -887,7 +935,7 @@ struct
               || Int63.compare (IO.offset log.io)
                    (Int63.of_int t.config.log_size)
                  > 0
-            then merge' ~force ?hook ~witness t
+            then merge' ~force ?hook ~witness t_outer
             else Thread.return `Completed)
 
   let merge t = ignore (try_merge_aux ?hook:None ~force:true t : _ async)
@@ -900,14 +948,16 @@ struct
     Semaphore.is_held t.merge_lock
 
   let is_merging t =
-    let t = check_open t in
+    let t = (check_open t).state in
     if t.config.readonly then raise RO_not_allowed;
     instance_is_merging t
 
   (** {1 Replace} *)
 
   let replace' ?hook ?(overcommit = false) t key value =
-    let t = check_open t in
+    let t_outer = check_open t in
+    with_trace t_outer ~name:"replace" @@ fun () ->
+    let t = t_outer.state in
     Stats.incr_nb_replace ();
     Log.debug (fun l ->
         l "[%s] replace %a %a" (Filename.basename t.root) pp_key key pp_value
@@ -931,7 +981,7 @@ struct
       | `Overcommit_memory, false | `Block_writes, _ ->
           (* Start a merge, blocking if one is already running. *)
           let hook = hook |> Option.map (fun f stage -> f (`Merge stage)) in
-          Some (merge' ?hook ~witness:(Entry.v key value) t)
+          Some (merge' ?hook ~witness:(Entry.v key value) t_outer)
     else None
 
   let replace ?overcommit t key value =
@@ -950,7 +1000,8 @@ struct
   (** [filter] is implemented with a [merge], during which bindings that do not
       satisfy the predicate are not merged. *)
   let filter t f =
-    let t = check_open t in
+    let t_outer = check_open t in
+    let t = t_outer.state in
     Log.debug (fun l -> l "[%s] filter" (Filename.basename t.root));
     if t.config.readonly then raise RO_not_allowed;
     let witness =
@@ -960,7 +1011,9 @@ struct
     | None ->
         Log.debug (fun l -> l "[%s] index is empty" (Filename.basename t.root))
     | Some witness -> (
-        match Thread.await (merge' ~blocking:true ~filter:f ~witness t) with
+        match
+          Thread.await (merge' ~blocking:true ~filter:f ~witness t_outer)
+        with
         | Ok (`Aborted | `Completed) -> ()
         | Error (`Async_exn exn) ->
             Fmt.failwith "filter: asynchronous exception during merge (%s)"
@@ -969,7 +1022,7 @@ struct
   (** {1 Iter} *)
 
   let iter f t =
-    let t = check_open t in
+    let t = (check_open t).state in
     Log.debug (fun l -> l "[%s] iter" (Filename.basename t.root));
     match t.log with
     | None -> ()
@@ -988,6 +1041,7 @@ struct
     match !it with
     | None -> Log.debug (fun l -> l "close: instance already closed")
     | Some t ->
+        let t = t.state in
         Log.debug (fun l -> l "[%s] close" (Filename.basename t.root));
         if abort_merge then (
           t.pending_cancel <- true;
@@ -1009,7 +1063,8 @@ struct
                   IO.close l.io)
                 t.log;
               Option.iter (fun (i : index) -> IO.close i.io) t.index;
-              Option.iter (fun lock -> IO.Lock.unlock lock) t.writer_lock))
+              Option.iter (fun lock -> IO.Lock.unlock lock) t.writer_lock));
+        Trace.close t.trace
 
   let close = close' ~hook:(fun _ -> ())
 
