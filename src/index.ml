@@ -269,20 +269,27 @@ struct
     let span = Clock.count timer in
     k (r, Mtime.Span.to_s span)
 
-  let emit t ~name ~start_time ~duration =
-    let dur = Chrome_trace.Event.Timestamp.of_float_seconds duration in
-    let event =
-      Chrome_trace.Event.complete ~dur
-        Chrome_trace.Event.(
-          common_fields ~pid:t.pid ~tid:t.tid ~ts:start_time ~name ())
-    in
-    Trace.emit t.state.trace event
+  let emit t event = Trace.emit t.state.trace event
 
   let with_trace t ~name f =
-    let start_time = Chrome_trace.Event.Timestamp.now () in
+    let open Chrome_trace.Event in
+    let start_time = Timestamp.now () in
     let& r, duration = f in
-    emit t ~name ~start_time ~duration;
+    let event =
+      let dur = Timestamp.of_float_seconds duration in
+      complete ~dur
+        (common_fields ~pid:t.pid ~tid:t.tid ~ts:start_time ~name ())
+    in
+    emit t event;
     r
+
+  let trace_point t ~name =
+    let event =
+      let open Chrome_trace.Event in
+      let ts = Timestamp.now () in
+      async (Int 0) Instant (common_fields ~pid:t.pid ~tid:t.tid ~ts ~name ())
+    in
+    emit t event
 
   (** Syncs the [index] of the instance by checking on-disk changes. *)
   let sync_index t =
@@ -802,19 +809,27 @@ struct
           with_trace t_outer ~name:"merge-rename" @@ fun () ->
           Semaphore.with_acquire "merge-rename" t.rename_lock (fun () ->
               let rename_lock_duration = Clock.count before_rename_lock in
-              IO.rename ~src:merge ~dst:index.io;
+
+              with_trace t_outer ~name:"io-rename" (fun () ->
+                  IO.rename ~src:merge ~dst:index.io);
               t.index <- Some index;
               t.generation <- generation;
-              IO.clear ~generation ~reopen:true log.io;
-              Tbl.clear log.mem;
+
+              with_trace t_outer ~name:"io-clear" (fun () ->
+                  IO.clear ~generation ~reopen:true log.io);
+
+              with_trace t_outer ~name:"tbl-clear" (fun () -> Tbl.clear log.mem);
               hook `After_clear;
               let log_async = Option.get t.log_async in
               let append_io = IO.append log.io in
-              Tbl.iter
-                (fun key value ->
-                  Tbl.replace log.mem key value;
-                  Entry.encode' key value append_io)
-                log_async.mem;
+
+              with_trace t_outer ~name:"tbl-iter-encode" (fun () ->
+                  Tbl.iter
+                    (fun key value ->
+                      Tbl.replace log.mem key value;
+                      Entry.encode' key value append_io)
+                    log_async.mem);
+
               (* NOTE: It {i may} not be necessary to trigger the
                  [flush_callback] here. If the instance has been recently
                  flushed (or [log_async] just reached the [auto_flush_limit]),
@@ -823,7 +838,8 @@ struct
               (* `fsync` is necessary, since bindings in `log_async` may have
                  been explicitely `fsync`ed during the merge, so we need to
                  maintain their durability. *)
-              IO.flush ~with_fsync:true log.io;
+              with_trace t_outer ~name:"merge-flush" (fun () ->
+                  IO.flush ~with_fsync:true log.io);
               IO.clear ~generation:(Int63.succ generation) ~reopen:false
                 log_async.io;
               (* log_async.mem does not need to be cleared as we are discarding
@@ -964,7 +980,9 @@ struct
           value);
     if t.config.readonly then raise RO_not_allowed;
     let log_limit_reached =
+      (* with_trace t_outer ~name:"replace-lock-blocked" @@ fun () -> *)
       Semaphore.with_acquire "replace" t.rename_lock (fun () ->
+          trace_point t_outer ~name:"replace-lock-taken";
           let log =
             match t.log_async with Some log -> log | None -> Option.get t.log
           in
@@ -972,7 +990,7 @@ struct
           Tbl.replace log.mem key value;
           Int63.compare (IO.offset log.io) (Int63.of_int t.config.log_size) > 0)
     in
-    if log_limit_reached && not overcommit then
+    if log_limit_reached && not overcommit then (
       let is_merging = instance_is_merging t in
       match (t.config.throttle, is_merging) with
       | `Overcommit_memory, true ->
@@ -980,8 +998,9 @@ struct
           None
       | `Overcommit_memory, false | `Block_writes, _ ->
           (* Start a merge, blocking if one is already running. *)
+          trace_point t_outer ~name:"replace-attempt-merge";
           let hook = hook |> Option.map (fun f stage -> f (`Merge stage)) in
-          Some (merge' ?hook ~witness:(Entry.v key value) t_outer)
+          Some (merge' ?hook ~witness:(Entry.v key value) t_outer))
     else None
 
   let replace ?overcommit t key value =
