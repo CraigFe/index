@@ -1,1 +1,1 @@
-val tests : unit Alcotest.test_case list
+include Alcotest.Unstable.Suite

@@ -47,7 +47,7 @@ let populate_random ~size io =
   (mem_arr, io_arr)
 
 (* Tests *)
-let read_sequential () =
+let%test "read_sequential" =
   let size = 1000 in
   let io = fresh_io "read_sequential" in
   let mem_arr, io_arr = populate_random ~size io in
@@ -59,7 +59,7 @@ let read_sequential () =
       expected actual
   done
 
-let read_sequential_prefetch () =
+let%test "read_sequential_prefetch" =
   let size = 1000 in
   let io = fresh_io "read_sequential_prefetch" in
   let mem_arr, io_arr = populate_random ~size io in
@@ -73,9 +73,3 @@ let read_sequential_prefetch () =
       (Fmt.strf "Inserted key at index %i is accessible" i)
       expected actual
   done
-
-let tests =
-  [
-    ("fresh", `Quick, read_sequential);
-    ("prefetch", `Quick, read_sequential_prefetch);
-  ]

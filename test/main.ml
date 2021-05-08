@@ -1,2 +1,3 @@
-let () =
-  Alcotest.run "index" [ ("cache", Cache.tests); ("search", Search.tests) ]
+module%test Cache = Cache
+module%test Search = Search
+[%%run_tests]

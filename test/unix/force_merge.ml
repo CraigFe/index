@@ -92,7 +92,7 @@ let test_fd () =
   | `Ok () -> ()
   | `Skip err -> Log.warn (fun m -> m "`test_fd` was skipped: %s" err)
 
-let readonly_s () =
+let%test "readonly_s" =
   let* { Context.tbl; clone; _ } = Context.with_full_index () in
   let r1 = clone ~readonly:true () in
   let r2 = clone ~readonly:true () in
@@ -102,7 +102,7 @@ let readonly_s () =
   test_find_present r3 tbl;
   test_fd ()
 
-let readonly () =
+let%test "readonly" =
   let* { Context.tbl; clone; _ } = Context.with_full_index () in
   let r1 = clone ~readonly:true () in
   let r2 = clone ~readonly:true () in
@@ -115,7 +115,7 @@ let readonly () =
     tbl;
   test_fd ()
 
-let readonly_and_merge () =
+let%test "readonly_and_merge" =
   let* { Context.rw; clone; _ } = Context.with_full_index () in
   let w = rw in
   let r1 = clone ~readonly:true () in
@@ -199,7 +199,7 @@ let readonly_and_merge () =
   test_fd ()
 
 (* A force merge has an implicit flush, however, if the replace occurs at the end of the merge, the value is not flushed *)
-let write_after_merge () =
+let%test "write_after_merge" =
   let* { Context.rw; clone; _ } = Context.with_full_index () in
   let w = rw in
   let r1 = clone ~readonly:true () in
@@ -216,7 +216,7 @@ let write_after_merge () =
   Alcotest.check_raises (Printf.sprintf "Absent value was found: %s." k2)
     Not_found (fun () -> ignore_value (Index.find r1 k2))
 
-let replace_while_merge () =
+let%test "replace_while_merge" =
   let* { Context.rw; clone; _ } = Context.with_full_index () in
   let w = rw in
   let r1 = clone ~readonly:true () in
@@ -241,7 +241,7 @@ let replace_while_merge () =
    added by a RW instance is found by a RO instance
 *)
 
-let find_while_merge () =
+let%test "find_while_merge" =
   let* { Context.rw; clone; _ } = Context.with_full_index () in
   let w = rw in
   let k1 = Key.v () in
@@ -259,7 +259,7 @@ let find_while_merge () =
   Index.await t3 |> check_completed;
   Index.await t4 |> check_completed
 
-let find_in_async_generation_change () =
+let%test "find_in_async_generation_change" =
   let* { Context.rw; clone; _ } = Context.with_full_index () in
   let w = rw in
   let r1 = clone ~readonly:true () in
@@ -274,7 +274,7 @@ let find_in_async_generation_change () =
   let t1 = Index.try_merge_aux ~force:true ~hook:(before f) w in
   Index.await t1 |> check_completed
 
-let find_in_async_same_generation () =
+let%test "find_in_async_same_generation" =
   let* { Context.rw; clone; _ } = Context.with_full_index () in
   let w = rw in
   let r1 = clone ~readonly:true () in
@@ -295,7 +295,7 @@ let find_in_async_same_generation () =
   let t1 = Index.try_merge_aux ~force:true ~hook:(before f) w in
   Index.await t1 |> check_completed
 
-let sync_before_and_after_clearing_async () =
+let%test "sync_before_and_after_clearing_async" =
   let* { Context.rw; clone; _ } = Context.with_full_index () in
   let w = rw in
   let ro = clone ~readonly:true () in
@@ -330,7 +330,7 @@ let sync_before_and_after_clearing_async () =
     find that value. But if the RO sync occurs during a merge, after a clear but
     before a generation change, then the value is missed. Also test ro find at
     this point. *)
-let sync_after_clear_log () =
+let%test "sync_after_clear_log" =
   let* Context.{ rw; clone; _ } = Context.with_empty_index () in
   let ro = clone ~readonly:true () in
   let k1, v1 = (Key.v (), Value.v ()) in
@@ -350,7 +350,7 @@ let sync_after_clear_log () =
 
 (** during a merge RO sync can miss a value if it reads the generation before
     the generation is updated. *)
-let merge_during_sync () =
+let%test "merge_during_sync" =
   let* Context.{ rw; clone; _ } = Context.with_empty_index () in
   let ro = clone ~readonly:true () in
   let k1, v1 = (Key.v (), Value.v ()) in
@@ -364,7 +364,7 @@ let merge_during_sync () =
   Index.sync' ~hook ro;
   test_one_entry ro k1 v1
 
-let test_is_merging () =
+let%test "test_is_merging" =
   let* Context.{ rw; _ } = Context.with_empty_index () in
   let add_binding_and_merge ~hook =
     let k1, v1 = (Key.v (), Value.v ()) in
@@ -384,7 +384,7 @@ let add_bindings index =
   Index.replace index k1 v1
 
 (** Test that a clear aborts the merge. *)
-let test_non_blocking_clear () =
+let%test "test_non_blocking_clear" =
   let* Context.{ rw; _ } = Context.with_empty_index () in
   let merge_started = Semaphore.make false and merge = Semaphore.make false in
   let merge_hook =
@@ -440,30 +440,7 @@ let test_abort_merge ~abort_merge () =
   let t = Index.try_merge_aux ~force:true rw in
   Index.await t |> check_completed
 
-let test_clear_aborts_merge = test_abort_merge ~abort_merge:Index.clear'
+let%test "clear_aborts_merge" = test_abort_merge ~abort_merge:Index.clear' ()
 
-let test_close_immediately_aborts_merge =
-  test_abort_merge ~abort_merge:(Index.close' ~immediately:())
-
-let tests =
-  [
-    ("readonly in sequence", `Quick, readonly_s);
-    ("readonly interleaved", `Quick, readonly);
-    ("interleaved merge", `Quick, readonly_and_merge);
-    ("write at the end of merge", `Quick, write_after_merge);
-    ("write in log_async", `Quick, replace_while_merge);
-    ("find while merging", `Quick, find_while_merge);
-    ("find in async without log", `Quick, find_in_async_generation_change);
-    ("find in async with log", `Quick, find_in_async_same_generation);
-    ( "sync before and after clearing the async",
-      `Quick,
-      sync_before_and_after_clearing_async );
-    ("sync and find after log cleared", `Quick, sync_after_clear_log);
-    ("merge during ro sync", `Quick, merge_during_sync);
-    ("is_merging", `Quick, test_is_merging);
-    ("clear is not blocking", `Quick, test_non_blocking_clear);
-    ("`clear` aborts merge", `Quick, test_clear_aborts_merge);
-    ( "`close ~immediately` aborts merge",
-      `Quick,
-      test_close_immediately_aborts_merge );
-  ]
+let%test "close_immediately_aborts_merge" =
+  test_abort_merge ~abort_merge:(Index.close' ~immediately:()) ()

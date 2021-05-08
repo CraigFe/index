@@ -1,4 +1,5 @@
 (test
  (name main)
  (package index)
- (libraries index alcotest optint))
+ (libraries index alcotest optint)
+ (preprocess (pps ppx_alcotest)))

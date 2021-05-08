@@ -54,7 +54,7 @@ let check_no_merge binding = function
         pp_binding binding
 
 (** Tests that [close] does not trigger the [flush_callback] *)
-let test_close () =
+let%test "close" =
   let fail typ () =
     Alcotest.failf "Closing <%s> should not trigger the flush_callback" typ
   in
@@ -75,7 +75,7 @@ let test_close () =
     "Closing a dirty index should trigger the flush_callback once" 1 !calls
 
 (** Test that [flush] triggers the [flush_callback] when necessary. *)
-let test_flush () =
+let%test "flush" =
   let Mutable_callback.{ require_callback; flush_callback } =
     Mutable_callback.v ()
   in
@@ -107,7 +107,7 @@ let test_flush () =
 
     - 1. Initial flush of [log] before an automatic merge.
     - 2. Flushing of [log_async] while a merge is ongoing. *)
-let test_replace () =
+let%test "replace" =
   let log_size = 8 in
   let bindings = Tbl.v ~size:log_size in
   let binding_list = bindings |> Hashtbl.to_seq |> List.of_seq in
@@ -184,10 +184,3 @@ let test_replace () =
   Hashtbl.add bindings (fst async_binding) (snd async_binding);
   Index.sync ro;
   check_equivalence ro bindings
-
-let tests =
-  [
-    ("close", `Quick, test_close);
-    ("flush", `Quick, test_flush);
-    ("replace", `Quick, test_replace);
-  ]

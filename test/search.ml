@@ -52,7 +52,7 @@ end
 
 module Search = Index.Private.Search.Make (Entry) (EltArray) (Metric_key)
 
-let interpolation_unique () =
+let%test "interpolation_unique" =
   let array = Array.init 10_000 (fun i -> (i, string_of_int i)) in
   let length = EltArray.length array in
   Array.iter
@@ -84,7 +84,7 @@ end
 module Search_constant =
   Index.Private.Search.Make (Entry) (EltArray) (Metric_constant)
 
-let interpolation_constant_metric () =
+let%test "interpolation_constant_metric" =
   let array = Array.init 100 (fun i -> (i, string_of_int i)) in
   let length = EltArray.length array in
   Array.iter
@@ -93,11 +93,5 @@ let interpolation_constant_metric () =
         ~high:Int63.(pred length)
       |> Alcotest.(check string) "" v)
     array
-
-let tests =
-  [
-    Alcotest.test_case "unique" `Quick interpolation_unique;
-    Alcotest.test_case "constant metric" `Quick interpolation_constant_metric;
-  ]
 
 let () = Random.self_init ()
