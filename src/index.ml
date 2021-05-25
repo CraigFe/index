@@ -102,13 +102,124 @@ struct
             index's flushes with the flushes of larger systems. *)
   }
 
-  type index = {
-    io : IO.t;  (** The disk file handler. *)
-    fan_out : [ `Read ] Fan.t;
-        (** The fan-out, used to map keys to small intervals in the file, in
-            constant time. This is an in-memory object, also encoded in the
-            header of [io]. *)
-  }
+  module IOArray = Io_array.Make (IO) (Entry)
+
+  module Search =
+    Search.Make (Entry) (IOArray)
+      (struct
+        type t = int
+
+        module Entry = Entry
+
+        let compare : int -> int -> int = compare
+        let of_entry e = e.Entry.key_hash
+        let of_key = K.hash
+
+        let linear_interpolate ~low:(low_index, low_metric)
+            ~high:(high_index, high_metric) key_metric =
+          let low_in = float_of_int low_metric in
+          let high_in = float_of_int high_metric in
+          let target_in = float_of_int key_metric in
+          let low_out = Int63.to_float low_index in
+          let high_out = Int63.to_float high_index in
+          (* Fractional position of [target_in] along the line from [low_in] to [high_in] *)
+          let proportion = (target_in -. low_in) /. (high_in -. low_in) in
+          (* Convert fractional position to position in output space *)
+          let position = low_out +. (proportion *. (high_out -. low_out)) in
+          let rounded = ceil (position -. 0.5) +. 0.5 in
+          Int63.of_float rounded
+      end)
+
+  module Data_file : sig
+    type t
+
+    val load : string -> t option
+    val find : t -> key -> value
+    val clear : t -> unit
+    val close : t -> unit
+  end = struct
+    type t = {
+      io : IO.t;  (** The disk file handler. *)
+      fan_out : [ `Read ] Fan.t;
+          (** The fan-out, used to map keys to small intervals in the file, in
+              constant time. This is an in-memory object, also encoded in the
+              header of [io]. *)
+      path : string;
+      generation : int63;
+    }
+
+    let load path =
+      match IO.v_readonly path with
+      | Error `No_file_on_disk -> failwith "TODO: race condition?"
+      | Ok io ->
+          let fan_out = Fan.import ~hash_size:K.hash_size (IO.get_fanout io) in
+          let generation = IO.get_generation io in
+          (* We maintain that [index] is [None] if the file is empty. *)
+          if IO.offset io = Int63.zero then None
+          else Some { fan_out; io; path; generation }
+
+    let find index key =
+      let hashed_key = K.hash key in
+      let low_bytes, high_bytes = Fan.search index.fan_out hashed_key in
+      let low, high =
+        Int63.(div low_bytes entry_sizeL, div high_bytes entry_sizeL)
+      in
+      Search.interpolation_search (IOArray.v index.io) key ~low ~high
+
+    let clear { io; generation; _ } =
+      IO.clear ~generation:Int63.(generation + one) ~reopen:false io
+
+    let close t = IO.close t.io
+  end
+
+  module Data_array : sig
+    type t
+
+    val load : root:string -> t
+    val sync : t -> unit
+    val clear : t -> unit
+  end = struct
+    type t = { files : Data_file.t Vector.t; root : string }
+
+    module Name = struct
+      let parse n =
+        match String.split_on_char '-' n with
+        | [ "data"; size ] -> int_of_string size
+        | _ -> Fmt.failwith "Invalid file name format: %s" n
+
+      let create i = Fmt.str "data-%d" i
+    end
+
+    let load ~root =
+      let path = Layout.data ~root in
+      let data_files = Sys.readdir path in
+
+      let data_file_names =
+        data_files
+        |> Array.to_list
+        |> List.map Name.parse
+        |> List.sort Int.compare
+      in
+      let files =
+        data_file_names
+        |> List.filter_map (fun size ->
+               let path = Filename.concat root (Name.create size) in
+               Data_file.load path)
+        |> Vector.of_list
+      in
+      { files; root }
+
+    let sync t =
+      (* Close the file handler to be able to reload it, as the file may have
+         changed after a merge. *)
+      let new_files = (load ~root:t.root).files in
+      Vector.swap t.files new_files
+
+    let clear t =
+      (* TODO: consider race conditions *)
+      Vector.iter Data_file.clear t.files;
+      Vector.clear t.files
+  end
 
   type log = {
     io : IO.t;  (** The disk file handler. *)
@@ -121,7 +232,7 @@ struct
     mutable generation : int63;
         (** The generation is a counter of rewriting operations (e.g. [clear]
             and [merge]). It is used to sync RO instances. *)
-    mutable index : index option;
+    mutable data : Data_array.t;
         (** The main index file contains old sorted bindings. It is [None] when
             no [merge] occurred yet. On RO instances, this is also [None] when
             the file is empty, e.g. after a [clear]. *)
@@ -178,11 +289,7 @@ struct
           (fun (l : log) ->
             IO.clear ~generation:t.generation ~reopen:false l.io)
           t.log_async;
-        Option.iter
-          (fun (i : index) ->
-            IO.clear ~generation:t.generation ~reopen:false i.io)
-          t.index;
-        t.index <- None;
+        Data_array.clear t.data;
         t.log_async <- None)
 
   let clear = clear' ~hook:(fun _ -> ())
@@ -261,18 +368,7 @@ struct
         else if offset > h.offset then assert false
 
   (** Syncs the [index] of the instance by checking on-disk changes. *)
-  let sync_index t =
-    (* Close the file handler to be able to reload it, as the file may have
-       changed after a merge. *)
-    Option.iter (fun (i : index) -> IO.close i.io) t.index;
-    let index_path = Layout.data ~root:t.root in
-    match IO.v_readonly index_path with
-    | Error `No_file_on_disk -> t.index <- None
-    | Ok io ->
-        let fan_out = Fan.import ~hash_size:K.hash_size (IO.get_fanout io) in
-        (* We maintain that [index] is [None] if the file is empty. *)
-        if IO.offset io = Int63.zero then t.index <- None
-        else t.index <- Some { fan_out; io }
+  let sync_index t = Data_array.sync t.data
 
   (** Syncs an instance entirely, by checking on-disk changes for [log], [sync],
       and [log_async]. *)
@@ -338,42 +434,6 @@ struct
 
   (** {1 Find and Mem}*)
 
-  module IOArray = Io_array.Make (IO) (Entry)
-
-  module Search =
-    Search.Make (Entry) (IOArray)
-      (struct
-        type t = int
-
-        module Entry = Entry
-
-        let compare : int -> int -> int = compare
-        let of_entry e = e.Entry.key_hash
-        let of_key = K.hash
-
-        let linear_interpolate ~low:(low_index, low_metric)
-            ~high:(high_index, high_metric) key_metric =
-          let low_in = float_of_int low_metric in
-          let high_in = float_of_int high_metric in
-          let target_in = float_of_int key_metric in
-          let low_out = Int63.to_float low_index in
-          let high_out = Int63.to_float high_index in
-          (* Fractional position of [target_in] along the line from [low_in] to [high_in] *)
-          let proportion = (target_in -. low_in) /. (high_in -. low_in) in
-          (* Convert fractional position to position in output space *)
-          let position = low_out +. (proportion *. (high_out -. low_out)) in
-          let rounded = ceil (position -. 0.5) +. 0.5 in
-          Int63.of_float rounded
-      end)
-
-  let interpolation_search index key =
-    let hashed_key = K.hash key in
-    let low_bytes, high_bytes = Fan.search index.fan_out hashed_key in
-    let low, high =
-      Int63.(div low_bytes entry_sizeL, div high_bytes entry_sizeL)
-    in
-    Search.interpolation_search (IOArray.v index.io) key ~low ~high
-
   (** Finds the value associated to [key] in [t]. In order, checks in
       [log_async] (in memory), then [log] (in memory), then [index] (on disk). *)
   let find_instance t key =
@@ -395,7 +455,7 @@ struct
       find_if_exists ~name:"log" ~find:(fun log -> Tbl.find log.mem) t.log
     in
     let find_index () =
-      find_if_exists ~name:"index" ~find:interpolation_search t.index
+      find_if_exists ~name:"index" ~find:Data_array.find t.index
     in
     Semaphore.with_acquire "find_instance" t.rename_lock @@ fun () ->
     match find_log_async () with
