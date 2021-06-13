@@ -130,6 +130,8 @@ struct
           Int63.of_float rounded
       end)
 
+  (** A [Data_file] is a persisted, sorted sequence of entries with a
+      corresponding persistant [Fan] for fast approximate lookup. *)
   module Data_file : sig
     type t
 
@@ -137,6 +139,16 @@ struct
     val find : t -> key -> value
     val clear : t -> unit
     val close : t -> unit
+
+    module Builder : sig
+      type data_file
+      type t
+
+      val create : path:string -> generation:int -> estimated_size:int -> t
+      val add : t -> Entry.t -> unit
+      val finalise : t -> data_file
+    end
+    with type data_file := t
   end = struct
     type t = {
       io : IO.t;  (** The disk file handler. *)
@@ -170,44 +182,116 @@ struct
       IO.clear ~generation:Int63.(generation + one) ~reopen:false io
 
     let close t = IO.close t.io
+
+    module Builder = struct
+      type nonrec t = t
+
+      let create ~path ~generation ~estimated_size =
+        let fan_out =
+          Fan.v ~hash_size:K.hash_size ~entry_size:Entry.encoded_size
+            estimated_size
+        in
+        let fan_size = Fan.exported_size fan_out in
+        let io = IO.v ~fresh:true ~generation ~fan_size path in
+        { io; fan_out; path; generation }
+    end
   end
 
   module Data_array : sig
     type t
 
+    (* TODO: do we really need this? *)
+    val empty : root:string -> t
     val load : root:string -> t
+    val find : t -> key -> value
     val sync : t -> unit
+
+    val add : t -> Entry.t array -> unit
+    (** The entries to be added are assumed to be pre-sorted. *)
+
     val clear : t -> unit
   end = struct
-    type t = { files : Data_file.t Vector.t; root : string }
+    type file_vector = Data_file.t option Vector.t
+    (* The files are arranged in increasing order of size by powers of two.
+
+       Specifically, for any index [i] into the vector: if that slot is occupied
+       by a data file, then the file contains a number of bindings in the range
+       [[2^{i+1}, 2^{i+2}\]].
+
+       TODO: how to handle duplicate bindings lowering the slot count after the
+       merge is complete? *)
+
+    type slot = Slot of int [@@unboxed]
+    (* An index into a [file_vector]. *)
+
+    let next_slot (Slot n) = Slot (n + 1)
+
+    let get_slot vec (Slot n) =
+      if n >= Vector.length vec then None else Vector.get vec n
+
+    type t = { files : file_vector; root : string }
+
+    let slot_of_size n =
+      assert (n > 0);
+      let rec loop acc = function
+        | 1 -> Slot acc
+        | n -> loop (succ acc) (n / 2)
+      in
+      loop 0 n
+
+    type merge_spec = { inputs : slot list; output : slot }
+
+    let compute_input_slots_for_merge :
+        file_vector -> batch_size:int -> merge_spec =
+     fun vec ~batch_size ->
+      let rec loop acc i =
+        if Option.is_none (get_slot vec i) then
+          (* The slot is unoccupied: we can aim to write directly to it. *)
+          { inputs = acc; output = i }
+        else loop (i :: acc) (next_slot i)
+      in
+      let initial_slot = slot_of_size batch_size in
+      loop [] initial_slot
 
     module Name = struct
-      let parse n =
-        match String.split_on_char '-' n with
-        | [ "data"; size ] -> int_of_string size
-        | _ -> Fmt.failwith "Invalid file name format: %s" n
+      type t = { fname : string; slot : slot }
 
+      let create_exn fname =
+        let invalid () = Fmt.failwith "Invalid file name format: %s" fname in
+        match String.split_on_char '-' fname with
+        | [ "data"; size ] ->
+            let index = int_of_string size in
+            if index < 0 then invalid ();
+            { fname; slot = Slot index }
+        | _ -> invalid ()
+
+      let compare { slot = Slot a; _ } { slot = Slot b; _ } = Int.compare a b
       let create i = Fmt.str "data-%d" i
     end
 
+    let empty ~root = { files = Vector.create (); root }
+
     let load ~root =
       let path = Layout.data ~root in
-      let data_files = Sys.readdir path in
+      let occupied_slots = Sys.readdir path |> Array.map Name.create_exn in
+      Array.sort Name.compare occupied_slots;
+      let (Slot largest_slot_idx) =
+        occupied_slots.(Array.length occupied_slots - 1).slot
+      in
+      let files = Vector.make (largest_slot_idx + 1) None in
+      ArrayLabels.iter occupied_slots ~f:(fun slot ->
+          let data_file =
+            let path = Filename.concat root slot.Name.fname in
+            Data_file.load path
+          in
+          let (Slot slot_idx) = slot.Name.slot in
+          Vector.set files slot_idx data_file);
 
-      let data_file_names =
-        data_files
-        |> Array.to_list
-        |> List.map Name.parse
-        |> List.sort Int.compare
-      in
-      let files =
-        data_file_names
-        |> List.filter_map (fun size ->
-               let path = Filename.concat root (Name.create size) in
-               Data_file.load path)
-        |> Vector.of_list
-      in
       { files; root }
+
+    let find _ =
+      (* TODO: search each file sequentially *)
+      assert false
 
     let sync t =
       (* Close the file handler to be able to reload it, as the file may have
@@ -215,9 +299,15 @@ struct
       let new_files = (load ~root:t.root).files in
       Vector.swap t.files new_files
 
+    let add t entries =
+      let batch_size = Array.length entries in
+      let spec = compute_input_slots_for_merge t.files ~batch_size in
+
+      assert false
+
     let clear t =
       (* TODO: consider race conditions *)
-      Vector.iter Data_file.clear t.files;
+      Vector.iter (Option.iter Data_file.clear) t.files;
       Vector.clear t.files
   end
 
@@ -289,6 +379,7 @@ struct
           (fun (l : log) ->
             IO.clear ~generation:t.generation ~reopen:false l.io)
           t.log_async;
+
         Data_array.clear t.data;
         t.log_async <- None)
 
@@ -435,7 +526,7 @@ struct
   (** {1 Find and Mem}*)
 
   (** Finds the value associated to [key] in [t]. In order, checks in
-      [log_async] (in memory), then [log] (in memory), then [index] (on disk). *)
+      [log_async] (in memory), then [log] (in memory), then [data] (on disk). *)
   let find_instance t key =
     let find_if_exists ~name ~find db =
       match db with
@@ -454,14 +545,12 @@ struct
     let find_log () =
       find_if_exists ~name:"log" ~find:(fun log -> Tbl.find log.mem) t.log
     in
-    let find_index () =
-      find_if_exists ~name:"index" ~find:Data_array.find t.index
-    in
+    let find_data () = Data_array.find t.data key in
     Semaphore.with_acquire "find_instance" t.rename_lock @@ fun () ->
     match find_log_async () with
     | e -> e
     | exception Not_found -> (
-        match find_log () with e -> e | exception Not_found -> find_index ())
+        match find_log () with e -> e | exception Not_found -> find_data ())
 
   let find t key =
     let t = check_open t in
@@ -548,32 +637,9 @@ struct
             IO.flush log.io;
             IO.clear ~generation ~reopen:false io)
           log);
-    let index =
-      if readonly then None
-      else
-        let index_path = Layout.data ~root in
-        if IO.exists index_path then
-          let io =
-            (* NOTE: No [flush_callback] on the Index IO as we maintain the
-               invariant that any bindings it contains were previously persisted
-               in either [log] or [log_async]. *)
-            IO.v ?flush_callback:None ~fresh ~generation ~fan_size:Int63.zero
-              index_path
-          in
-          let entries = Int63.div (IO.offset io) entry_sizeL in
-          if entries = Int63.zero then None
-          else (
-            Log.debug (fun l ->
-                l "[%s] index file detected. Loading %a entries"
-                  (Filename.basename root) Int63.pp entries);
-            let fan_out =
-              Fan.import ~hash_size:K.hash_size (IO.get_fanout io)
-            in
-            Some { fan_out; io })
-        else (
-          Log.debug (fun l ->
-              l "[%s] no index file detected." (Filename.basename root));
-          None)
+    let data =
+      let root = Layout.data ~root in
+      if readonly then Data_array.empty ~root else Data_array.load ~root
     in
     {
       config;
@@ -581,7 +647,7 @@ struct
       log;
       log_async = None;
       root;
-      index;
+      data;
       open_instances = 1;
       merge_lock = Semaphore.make true;
       rename_lock = Semaphore.make true;
