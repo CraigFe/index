@@ -150,15 +150,17 @@ struct
     end
     with type data_file := t
   end = struct
-    type t = {
+    type 'perms t_with_perms = {
       io : IO.t;  (** The disk file handler. *)
-      fan_out : [ `Read ] Fan.t;
+      fan_out : 'perms Fan.t;
           (** The fan-out, used to map keys to small intervals in the file, in
               constant time. This is an in-memory object, also encoded in the
               header of [io]. *)
       path : string;
       generation : int63;
     }
+
+    type t = [ `Read ] t_with_perms
 
     let load path =
       match IO.v_readonly path with
@@ -184,16 +186,21 @@ struct
     let close t = IO.close t.io
 
     module Builder = struct
-      type nonrec t = t
+      type nonrec t = [ `Write ] t_with_perms
 
       let create ~path ~generation ~estimated_size =
         let fan_out =
           Fan.v ~hash_size:K.hash_size ~entry_size:Entry.encoded_size
             estimated_size
         in
-        let fan_size = Fan.exported_size fan_out in
+        let fan_size = Int63.of_int (Fan.exported_size fan_out) in
         let io = IO.v ~fresh:true ~generation ~fan_size path in
         { io; fan_out; path; generation }
+
+      let finalise t =
+        let fan_out = Fan.finalize (* TODO: US/UK consistency *) t.fan_out in
+        IO.set_fanout t.io (Fan.export fan_out);
+        { t with fan_out }
     end
   end
 
@@ -218,8 +225,11 @@ struct
        by a data file, then the file contains a number of bindings in the range
        [[2^{i+1}, 2^{i+2}\]].
 
+       TODO: keep vector relative to some smallest index, to avoid iterating
+             over many [None]s at the start of the vector in the common case.
+
        TODO: how to handle duplicate bindings lowering the slot count after the
-       merge is complete? *)
+             merge is complete? *)
 
     type slot = Slot of int [@@unboxed]
     (* An index into a [file_vector]. *)
@@ -243,6 +253,11 @@ struct
 
     let compute_input_slots_for_merge :
         file_vector -> batch_size:int -> merge_spec =
+     (* TODO: have some notion of "smallest merge granularity" to account for
+              forced merges with when the log size is smaller than the limit. We
+              don't want to accumulate many small data files unless the user
+              actually needs this -- i.e. the [log_size] parameter is very
+              small. *)
      fun vec ~batch_size ->
       let rec loop acc i =
         if Option.is_none (get_slot vec i) then
@@ -289,9 +304,20 @@ struct
 
       { files; root }
 
-    let find _ =
-      (* TODO: search each file sequentially *)
-      assert false
+    let find t key =
+      (* Find by searching in each file in increasing order. The ordering is
+         important for correctness, as smaller data-files may contain bindings
+         that shadow stale bindings (for the same key) held in larger files. *)
+      let nb_files = Vector.length t.files in
+      let rec loop i =
+        if i > nb_files then assert false;
+        if i = nb_files then raise Not_found;
+        match Vector.get t.files i with
+        | None -> loop (i + 1)
+        | Some data_file -> (
+            try Data_file.find data_file key with Not_found -> loop (i + 1))
+      in
+      loop 0
 
     let sync t =
       (* Close the file handler to be able to reload it, as the file may have
@@ -302,7 +328,6 @@ struct
     let add t entries =
       let batch_size = Array.length entries in
       let spec = compute_input_slots_for_merge t.files ~batch_size in
-
       assert false
 
     let clear t =
