@@ -137,18 +137,28 @@ struct
 
     val load : string -> t option
     val find : t -> key -> value
+    val length : t -> int
     val clear : t -> unit
     val close : t -> unit
 
-    module Builder : sig
-      type data_file
+    type data_file := t
+
+    module Iterator : sig
       type t
 
-      val create : path:string -> generation:int -> estimated_size:int -> t
+      val create : data_file -> t
+
+      val pop_exn : t -> Entry.t
+      (** May raise [End_of_file]. *)
+    end
+
+    module Builder : sig
+      type t
+
+      val create : path:string -> generation:int63 -> estimated_length:int -> t
       val add : t -> Entry.t -> unit
       val finalise : t -> data_file
     end
-    with type data_file := t
   end = struct
     type 'perms t_with_perms = {
       io : IO.t;  (** The disk file handler. *)
@@ -180,22 +190,32 @@ struct
       in
       Search.interpolation_search (IOArray.v index.io) key ~low ~high
 
+    let length t = Int63.(to_int_exn (IO.offset t.io / entry_sizeL))
+
     let clear { io; generation; _ } =
       IO.clear ~generation:Int63.(generation + one) ~reopen:false io
 
     let close t = IO.close t.io
 
+    module Iterator = struct
+      type t = { mutable cursor_offset : int63; instance : t }
+    end
+
     module Builder = struct
       type nonrec t = [ `Write ] t_with_perms
 
-      let create ~path ~generation ~estimated_size =
+      let create ~path ~generation ~estimated_length =
         let fan_out =
           Fan.v ~hash_size:K.hash_size ~entry_size:Entry.encoded_size
-            estimated_size
+            estimated_length
         in
         let fan_size = Int63.of_int (Fan.exported_size fan_out) in
         let io = IO.v ~fresh:true ~generation ~fan_size path in
         { io; fan_out; path; generation }
+
+      let add t entry =
+        Fan.update t.fan_out entry.Entry.key_hash (IO.offset t.io);
+        Entry.encode entry (IO.append t.io)
 
       let finalise t =
         let fan_out = Fan.finalize (* TODO: US/UK consistency *) t.fan_out in
@@ -213,8 +233,13 @@ struct
     val find : t -> key -> value
     val sync : t -> unit
 
-    val add : t -> Entry.t array -> unit
-    (** The entries to be added are assumed to be pre-sorted. *)
+    val add : t -> generation:int63 -> Entry.t array -> unit
+    (** The entries to be added are assumed to be pre-sorted.
+
+        TODO: keep [generation] internally? *)
+
+    (* TODO: expose [strategy:[`Minimal | `Complete]] parameter, which will be
+             necessary for [filter] to retain its current semantics. *)
 
     val clear : t -> unit
   end = struct
@@ -229,7 +254,10 @@ struct
              over many [None]s at the start of the vector in the common case.
 
        TODO: how to handle duplicate bindings lowering the slot count after the
-             merge is complete? *)
+             merge is complete? I think this is probably fine: selected inputs
+             will be a contiguous region of the vector, and it's not possible
+             for the resulting output to be smaller than the largest input
+             selected from that region. *)
 
     type slot = Slot of int [@@unboxed]
     (* An index into a [file_vector]. *)
@@ -249,7 +277,7 @@ struct
       in
       loop 0 n
 
-    type merge_spec = { inputs : slot list; output : slot }
+    type merge_spec = { inputs : (slot * Data_file.t) list }
 
     let compute_input_slots_for_merge :
         file_vector -> batch_size:int -> merge_spec =
@@ -260,10 +288,11 @@ struct
               small. *)
      fun vec ~batch_size ->
       let rec loop acc i =
-        if Option.is_none (get_slot vec i) then
-          (* The slot is unoccupied: we can aim to write directly to it. *)
-          { inputs = acc; output = i }
-        else loop (i :: acc) (next_slot i)
+        match get_slot vec i with
+        | None ->
+            (* This slot is unoccupied: we can aim to write directly to it. *)
+            { inputs = acc }
+        | Some df -> loop ((i, df) :: acc) (next_slot i)
       in
       let initial_slot = slot_of_size batch_size in
       loop [] initial_slot
@@ -325,10 +354,22 @@ struct
       let new_files = (load ~root:t.root).files in
       Vector.swap t.files new_files
 
-    let add t entries =
+    let add t ~generation entries =
       let batch_size = Array.length entries in
       let spec = compute_input_slots_for_merge t.files ~batch_size in
-      assert false
+      match spec.inputs with
+      | [] -> assert false (* Just dump log straight to [output] *)
+      | _ :: _ ->
+          let nb_input_entries =
+            ListLabels.fold_left spec.inputs ~init:0 ~f:(fun acc (_slot, df) ->
+                acc + Data_file.length df)
+          in
+          let output_file =
+            let path = Layout.merge ~root:t.root in
+            let estimated_length = nb_input_entries + batch_size in
+            Data_file.Builder.create ~path ~generation ~estimated_length
+          in
+          assert false
 
     let clear t =
       (* TODO: consider race conditions *)
